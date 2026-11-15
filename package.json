@@ -1,0 +1,23 @@
+{
+  "name": "dock",
+  "version": "1.0.0",
+  "description": "Dock: install and run open-source GitHub tools on a phone, in an emulated Linux.",
+  "scripts": {
+    "start": "node server/relay.mjs",
+    "test": "node --test tests/unit.test.mjs",
+    "vendor": "node scripts/vendor.mjs",
+    "build:image": "image/build-rootfs.sh && python3 image/make-image.py"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "v86": "^0.5.473",
+    "ws": "^8.23.0"
+  },
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  }
+}

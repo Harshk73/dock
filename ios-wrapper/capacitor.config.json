@@ -1,0 +1,13 @@
+{
+  "appId": "app.dock.mobile",
+  "appName": "Dock",
+  "webDir": "../web",
+  "server": {
+    "url": "https://YOUR-DOCK-HOST.example.com",
+    "cleartext": false
+  },
+  "ios": {
+    "contentInset": "never",
+    "limitsNavigationsToAppBoundDomains": true
+  }
+}

@@ -1,0 +1,15 @@
+# One-click deploy on Render (https://render.com): New + -> Blueprint -> pick this repo.
+services:
+  - type: web
+    name: dock
+    runtime: docker
+    plan: free
+    healthCheckPath: /r/open/info
+    envVars:
+      - key: PORT
+        value: "8080"
+      # Optional but recommended: a private relay path. If you set this, enter
+      # https://<your-app>.onrender.com/r/<the value> under Settings -> Network relay
+      # and change healthCheckPath above to /r/<the value>/info.
+      # - key: DOCK_TOKEN
+      #   generateValue: true

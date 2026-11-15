@@ -1,0 +1,5 @@
+::sysinit:/etc/dock/rc.boot
+ttyS0::respawn:/bin/login -f root
+::respawn:/etc/dock/agent.py
+::shutdown:/etc/dock/rc.shutdown
+::ctrlaltdel:/sbin/reboot
