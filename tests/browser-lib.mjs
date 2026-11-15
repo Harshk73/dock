@@ -4,9 +4,9 @@ import { serve } from "./serve.mjs";
 
 export const SHOTS = process.env.SHOTS || "/tmp/claude-0/-home-user/695b14cd-41e5-5f7d-9343-86edcfeb245d/scratchpad/shots";
 
-export async function launch({ scale = 1 } = {}) {
+export async function launch({ scale = 1, direct = [] } = {}) {
   fs.mkdirSync(SHOTS, { recursive: true });
-  const server = await serve();
+  const server = await serve(0, { direct }); // hosts the relay reaches without the sandbox proxy
   const browser = await chromium.launch({ proxy: process.env.HTTPS_PROXY ? { server: process.env.HTTPS_PROXY, bypass: "127.0.0.1,localhost" } : undefined });
   const context = await browser.newContext({ ...devices["iPhone 14"], deviceScaleFactor: scale, permissions: ["clipboard-read", "clipboard-write"] });
   const page = await context.newPage();

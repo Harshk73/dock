@@ -30,7 +30,9 @@ await page.waitForTimeout(500);
 await shot("06-installed");
 assert.match(await page.textContent(".sheet.full h2"), /is ready/);
 
-await page.click(".sheet.full .btn.primary"); // Open in Terminal
+await page.click(".sheet.full .btn.primary"); // Open: the app's workspace
+await page.waitForSelector(".workspace .segmented");
+await page.click('.workspace [aria-label="Open in Terminal"]');
 await page.waitForSelector(".term-pane.active .xterm", { timeout: 20000 });
 await page.waitForFunction(() => /[#$] \S+ $/.test(window.dock.terminals.active()?.term.buffer.active.getLine(window.dock.terminals.active().term.buffer.active.cursorY)?.translateToString(true) + " "), null, { timeout: 30000 }).catch(() => {});
 await page.waitForTimeout(1500);

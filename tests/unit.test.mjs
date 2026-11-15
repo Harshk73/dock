@@ -122,3 +122,75 @@ test("ChunkDisk: copy-on-write, partial writes, atomic flush, reload", async () 
   await disk.flush();
   assert.equal((await overlay.get(0))[0], 6);
 });
+
+// ---------------------------------------------------------------- recipes
+import { parseHelp, buildCommand, findRecipe, parseTime, formatDuration, outputName, suggestedSites } from "../web/js/recipes.js";
+
+test("parseHelp reads options, arguments, groups and wrapped descriptions", () => {
+  const help = `Usage: tool [OPTIONS] FILE
+
+  General Options:
+    -h, --help                      Print this help text and exit
+    -q, --quiet                     Activate quiet mode. If used with
+                                    --verbose, print the log to stderr
+    --output TEMPLATE               Output filename template
+    -f, --format FORMAT             Video format code
+    --no-color                      Disable colors
+  Network Options:
+    --proxy URL                     Use the specified proxy
+    --retries=N                     Number of retries
+`;
+  const { usage, options } = parseHelp(help);
+  assert.equal(usage, "tool [OPTIONS] FILE");
+  assert.deepEqual(options.map(o => o.flag), ["--quiet", "--output", "--format", "--no-color", "--proxy", "--retries"]);
+  const quiet = options[0];
+  assert.equal(quiet.short, "-q");
+  assert.equal(quiet.arg, null);
+  assert.match(quiet.description, /quiet mode\. If used with --verbose, print/);
+  assert.equal(options[1].arg, "TEMPLATE");
+  assert.equal(options[2].short, "-f");
+  assert.equal(options[4].group, "Network");
+  assert.equal(options[5].arg, "N");
+});
+
+test("buildCommand quotes values and the input file", () => {
+  assert.equal(buildCommand("rg", [{ flag: "--ignore-case" }, { flag: "--max-count", value: "3" }], { extra: "needle", file: "/root/Files/my notes.txt" }),
+    "'rg' --ignore-case --max-count '3' needle '/root/Files/my notes.txt'");
+  assert.equal(buildCommand("x", [{ flag: "--name", value: "a'; rm -rf /" }]), `'x' --name 'a'\\''; rm -rf /'`);
+});
+
+test("recipes match installed apps and build safe commands", () => {
+  const yt = findRecipe({ bins: ["yt-dlp"] });
+  assert.equal(yt.id, "yt-dlp");
+  assert.equal(findRecipe({ bins: ["cowsay"] }), null);
+  assert.equal(suggestedSites({ bins: ["yt-dlp"] })[0].name, "YouTube");
+  const video = yt.actions.find(a => a.id === "video");
+  assert.deepEqual(video.needs({ quality: "360" }), []);
+  assert.deepEqual(video.needs({ quality: "720" }), ["ffmpeg"]);
+  const evil = "https://example.com/v?x='$(reboot)'";
+  const cmd = video.command({ url: evil, f: { quality: "720" } });
+  assert.ok(cmd.endsWith(`'https://example.com/v?x='\\''$(reboot)'\\'''`), cmd);
+  assert.match(cmd, /height<=720/);
+  assert.equal(yt.inspect.parse('{"id":"aqz-KE-bpKQ","title":"T","webpage_url":"https://www.youtube.com/watch?v=aqz-KE-bpKQ","duration":10}', "").embed,
+    "https://www.youtube-nocookie.com/embed/aqz-KE-bpKQ?playsinline=1");
+  assert.throws(() => yt.inspect.parse("ERROR: Unsupported URL: x", "x"), /Unsupported URL/);
+  const results = yt.search.parse('{"entries":[{"id":"abc","title":"One","channel":"C","duration":61}]}');
+  assert.equal(results[0].url, "https://www.youtube.com/watch?v=abc");
+
+  const ff = findRecipe({ bins: ["ffmpeg", "ffprobe"] });
+  const trim = ff.actions.find(a => a.id === "trim");
+  assert.equal(trim.command({ file: "/root/Files/my clip.mp4", f: { start: "0:05", end: "1:10" } }),
+    "ffmpeg -hide_banner -nostdin -y -ss 5 -to 70 -i '/root/Files/my clip.mp4' -c copy -avoid_negative_ts make_zero 'my clip-trim.mp4'");
+  assert.match(trim.command({ file: "/a.mp4", f: { start: "junk; reboot", end: "" } }), /-ss 0 -i/);
+  assert.match(ff.actions.find(a => a.id === "shrink").command({ file: "/a.mov", f: { height: "360; reboot" } }), /scale=-2:NaN/);
+});
+
+test("time and name helpers", () => {
+  assert.equal(parseTime("1:23"), 83);
+  assert.equal(parseTime("01:00:05.5"), 3605.5);
+  assert.equal(parseTime("abc"), null);
+  assert.equal(formatDuration(635), "10:35");
+  assert.equal(formatDuration(3723), "1:02:03");
+  assert.equal(outputName("/root/Files/a.b.mp4", "trim"), "a.b-trim.mp4");
+  assert.equal(outputName("/root/Files/clip.mov", "audio", "m4a"), "clip-audio.m4a");
+});

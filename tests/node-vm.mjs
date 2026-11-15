@@ -11,6 +11,14 @@ import { createRelay } from "../server/relay.mjs";
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VM = path.join(ROOT, "web", "vm");
 
+/** An overlay kept in a directory, so slow setup (installs) can be reused across test runs. */
+export class DirOverlay {
+  constructor(dir) { this.dir = dir; fs.mkdirSync(dir, { recursive: true }); }
+  async keys() { return fs.readdirSync(this.dir).map(Number); }
+  async get(i) { const f = path.join(this.dir, String(i)); return fs.existsSync(f) ? new Uint8Array(fs.readFileSync(f)) : undefined; }
+  putMany(entries) { for (const [i, chunk] of entries) fs.writeFileSync(path.join(this.dir, String(i)), chunk); return Promise.resolve(); }
+}
+
 export async function startVm({ overlay = new MemoryOverlay(), memoryMB = 512, echo = false } = {}) {
   // In the build sandbox every outbound connection must go through its HTTPS proxy.
   const upstream = process.env.HTTPS_PROXY ? new URL(process.env.HTTPS_PROXY) : null;

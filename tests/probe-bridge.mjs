@@ -1,0 +1,17 @@
+import crypto from "node:crypto";
+import { startVm } from "./node-vm.mjs";
+const vm = await startVm();
+const bridge = vm.machine.bridge;
+const data = new Uint8Array(crypto.randomBytes(8_000_000));
+const md5 = crypto.createHash("md5").update(data).digest("hex");
+let t = Date.now();
+let r = await vm.sh(`curl -fsS ${bridge.offer(data)} -o /tmp/in.bin && md5sum < /tmp/in.bin`);
+console.log(`into VM: ${(8 / ((Date.now() - t) / 1000)).toFixed(2)} MB/s ok=${r.text.startsWith(md5)} ${r.code} ${r.text.slice(0, 200)}`);
+t = Date.now();
+const sink = bridge.expect();
+const [, back] = await Promise.all([vm.sh(`curl -fsS -H Expect: -T /tmp/in.bin ${sink.url}`), sink.done]);
+console.log(`out of VM: ${(8 / ((Date.now() - t) / 1000)).toFixed(2)} MB/s ok=${crypto.createHash("md5").update(back).digest("hex") === md5}`);
+r = await vm.sh(`curl -s -o /dev/null -w '%{http_code}' http://192.168.86.1/pull/deadbeef; curl -sS -m 20 -o /dev/null -w ' %{http_code}' https://pypi.org/simple/pip/`);
+console.log("unknown token + internet still works:", r.text);
+await vm.stop();
+process.exit(0);

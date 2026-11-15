@@ -6,7 +6,8 @@ second serial port (ttyS1), so the host page can run several things at once.
 
 Wire format, both directions:  type:u8  channel:u16le  length:u32le  payload
 Host -> guest:  OPEN (json), DATA, RESIZE (rows:u16 cols:u16), CLOSE, PING, SYNC, SIGNAL (u8),
-                CONNECT (json: tcp connection to a port inside the VM, for app previews)
+                CONNECT (json: tcp connection to a port inside the VM, for app previews),
+                EOF (close the input of a session opened with stdin: true)
 Guest -> host:  READY (json), DATA, EXIT (code:i32), PONG, SYNCED
 """
 import errno
@@ -22,7 +23,7 @@ import termios
 import time
 import tty
 
-T_OPEN, T_DATA, T_RESIZE, T_CLOSE, T_PING, T_SYNC, T_SIGNAL, T_CONNECT = 1, 2, 3, 4, 5, 6, 7, 8
+T_OPEN, T_DATA, T_RESIZE, T_CLOSE, T_PING, T_SYNC, T_SIGNAL, T_CONNECT, T_EOF = 1, 2, 3, 4, 5, 6, 7, 8, 9
 R_READY, R_DATA, R_EXIT, R_PONG, R_SYNCED = 65, 66, 67, 68, 69
 HEADER = struct.Struct("<BHI")
 
@@ -56,6 +57,8 @@ def send(kind, channel, payload=b""):
 class Session:
     def __init__(self, channel, pid, fd):
         self.channel, self.pid, self.fd = channel, pid, fd
+        self.wfd = fd  # where input is written; a separate pipe for stdin: true
+        self.close_input = False
         self.outbox = bytearray()  # bytes waiting to be written to the process
         self.code = None
         self.kill_at = None
@@ -86,16 +89,18 @@ def open_session(channel, spec):
         pid, fd = pty.fork()
     else:
         read_end, write_end = os.pipe()
+        in_read, in_write = os.pipe() if spec.get("stdin") else (None, None)
         pid = os.fork()
         if pid == 0:
             os.setsid()
-            null = os.open("/dev/null", os.O_RDONLY)
-            os.dup2(null, 0)
+            os.dup2(in_read if in_read is not None else os.open("/dev/null", os.O_RDONLY), 0)
             os.dup2(write_end, 1)
             os.dup2(write_end, 2)
         else:
             os.close(write_end)
             fd = read_end
+            if in_read is not None:
+                os.close(in_read)
     if pid == 0:
         try:
             os.closerange(3, 256)
@@ -112,6 +117,11 @@ def open_session(channel, spec):
         set_size(fd, int(spec.get("rows") or 24), int(spec.get("cols") or 80))
     os.set_blocking(fd, False)
     session = Session(channel, pid, fd)
+    if not use_pty and in_write is not None:
+        os.set_blocking(in_write, False)
+        session.wfd = in_write
+    elif not use_pty:
+        session.wfd = None
     sessions[channel] = session
     by_pid[pid] = session
 
@@ -152,10 +162,11 @@ def finish(session):
         if not chunk:
             break
         send(R_DATA, session.channel, chunk)
-    try:
-        os.close(session.fd)
-    except OSError:
-        pass
+    for fd in {session.fd, session.wfd} - {None}:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
     sessions.pop(session.channel, None)
     by_pid.pop(session.pid, None)
     send(R_EXIT, session.channel, struct.pack("<i", session.code))
@@ -211,7 +222,10 @@ def handle(kind, channel, payload):
         if not session:
             return
         if kind == T_DATA:
-            session.outbox += payload
+            if session.wfd is not None:
+                session.outbox += payload
+        elif kind == T_EOF:
+            session.close_input = True
         elif kind == T_RESIZE and len(payload) >= 4:
             rows, cols = struct.unpack("<HH", payload[:4])
             set_size(session.fd, rows, cols)
@@ -231,7 +245,7 @@ def main():
     send(R_READY, 0, json.dumps({"kernel": os.uname().release, "agent": 2}).encode())
     while True:
         readers = [port, wake_r] + [s.fd for s in sessions.values() if not s.eof]
-        writers = [s.fd for s in sessions.values() if s.outbox or s.connecting]
+        writers = [s.wfd for s in sessions.values() if (s.outbox or s.connecting) and s.wfd is not None]
         try:
             readable, writable, _ = select.select(readers, writers, [], 1.0)
         except InterruptedError:
@@ -259,14 +273,18 @@ def main():
                     session.code = 1
                     finish(session)
                     continue
-            if session.fd in writable and session.outbox:
+            if session.wfd in writable and session.outbox:
                 try:
-                    n = os.write(session.fd, session.outbox[:1024])
+                    n = os.write(session.wfd, session.outbox[:65536 if session.wfd != session.fd else 1024])
                     del session.outbox[:n]
                 except BlockingIOError:
                     pass
                 except OSError:
                     session.outbox.clear()
+            if session.close_input and not session.outbox and session.wfd not in (None, session.fd):
+                os.close(session.wfd)
+                session.wfd = None
+                session.close_input = False
             if session.fd in readable and session.channel in sessions:
                 try:
                     chunk = os.read(session.fd, 4096)

@@ -4,12 +4,13 @@
   "description": "Dock: install and run open-source GitHub tools on a phone, in an emulated Linux.",
   "scripts": {
     "start": "node server/relay.mjs",
-    "test": "node --test tests/unit.test.mjs",
+    "test": "node --test --test-timeout=60000 tests/unit.test.mjs tests/assistant.test.mjs",
     "vendor": "node scripts/vendor.mjs",
     "build:image": "image/build-rootfs.sh && python3 image/make-image.py"
   },
   "license": "MIT",
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.8.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "v86": "^0.5.473",
@@ -19,5 +20,8 @@
   "private": true,
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
   }
 }

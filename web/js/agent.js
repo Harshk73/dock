@@ -2,7 +2,7 @@
 // Transport-agnostic: give it a function that writes bytes to the guest's second
 // serial port, and feed it every byte the guest writes back.
 
-const T = { OPEN: 1, DATA: 2, RESIZE: 3, CLOSE: 4, PING: 5, SYNC: 6, SIGNAL: 7, CONNECT: 8 };
+const T = { OPEN: 1, DATA: 2, RESIZE: 3, CLOSE: 4, PING: 5, SYNC: 6, SIGNAL: 7, CONNECT: 8, EOF: 9 };
 const R = { READY: 65, DATA: 66, EXIT: 67, PONG: 68, SYNCED: 69 };
 const HEADER = 7;
 const encoder = new TextEncoder();
@@ -22,6 +22,22 @@ export class Session {
     for (let off = 0; off < bytes.length; off += 4096) {
       this.agent.frame(T.DATA, this.channel, bytes.subarray(off, off + 4096));
     }
+  }
+  /**
+   * Writes a large amount of data without flooding the emulated serial port: waits for
+   * the guest to catch up after every block. For sessions opened with {stdin: true}.
+   */
+  async writeAll(bytes, onProgress) {
+    const BLOCK = 32768;
+    for (let off = 0; off < bytes.length && this.code === null; off += BLOCK) {
+      this.write(bytes.subarray(off, off + BLOCK));
+      await this.agent.ping(60000);
+      if (onProgress) onProgress(Math.min(bytes.length, off + BLOCK), bytes.length);
+    }
+  }
+  /** Signals end of input (stdin: true sessions). */
+  end() {
+    if (this.code === null) this.agent.frame(T.EOF, this.channel, new Uint8Array(0));
   }
   resize(rows, cols) {
     if (this.code !== null) return;
@@ -126,7 +142,8 @@ export class GuestAgent {
 
   /**
    * Starts a process in the guest.
-   * @param {object} spec {script?, argv?, cwd?, env?, rows?, cols?, pty?}
+   * @param {object} spec {script?, argv?, cwd?, env?, rows?, cols?, pty?, stdin?}
+   *   pty: false runs without a terminal; add stdin: true to feed it input (see Session.writeAll).
    *   With neither script nor argv, an interactive login shell is started.
    * @returns {Session}
    */

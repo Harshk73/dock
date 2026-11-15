@@ -1,0 +1,13 @@
+import { startVm, DirOverlay } from "./node-vm.mjs";
+const vm = await startVm({ overlay: new DirOverlay(process.argv[2]) });
+let r = await vm.sh('yt-dlp --no-playlist -F "https://www.youtube.com/watch?v=aqz-KE-bpKQ" 2>&1 | head -12 | cut -c1-220');
+console.log(r.text);
+await vm.sh("head -c 8000000 /dev/urandom > /tmp/big.bin");
+let n = 0;
+const t = Date.now();
+const code = await vm.machine.agent.run("cat /tmp/big.bin", bytes => { n += bytes.length; }, { pty: false });
+console.log(`serial: ${n} bytes in ${Date.now() - t} ms = ${(n / 1e6 / ((Date.now() - t) / 1000)).toFixed(2)} MB/s (exit ${code})`);
+r = await vm.sh("ls /dev/hvc* /dev/vport* /dev/virtio-ports 2>&1; grep -c . /proc/modules; lsmod | grep -i virtio");
+console.log(r.text);
+await vm.stop();
+process.exit(0);

@@ -1,0 +1,42 @@
+import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import { startVm } from "./node-vm.mjs";
+import { writeFile, readFile, listFiles, uploadFile, deleteFile, safeName } from "../web/js/files.js";
+const vm = await startVm();
+const agent = vm.machine.agent;
+const serial = { agent };            // no bridge: serial channel only
+const fast = vm.machine;             // agent + network bridge
+const safe = safeName("../../etc/pass wd?.mp4");
+assert.ok(!safe.includes("/") && !safe.startsWith(".") && safe.endsWith("pass wd_.mp4"), safe);
+const data = crypto.randomBytes(6_000_000);
+let t = Date.now();
+await writeFile(fast, "/root/Files/big.bin", new Uint8Array(data));
+const up = Date.now() - t;
+let r = await vm.sh("md5sum < /root/Files/big.bin; ls /root/Files");
+assert.equal(r.text.split(/\s+/)[0], crypto.createHash("md5").update(data).digest("hex"));
+assert.doesNotMatch(r.text, /\.part/);
+t = Date.now();
+const back = await readFile(fast, "/root/Files/big.bin");
+const down = Date.now() - t;
+assert.equal(Buffer.compare(Buffer.from(back), data), 0);
+const small = new Uint8Array(data.subarray(0, 300000));
+await writeFile(serial, "/root/Files/s.bin", small);
+assert.equal(Buffer.compare(Buffer.from(await readFile(serial, "/root/Files/s.bin")), Buffer.from(small)), 0, "serial fallback");
+await deleteFile(agent, "/root/Files/s.bin");
+console.log(`upload ${(6 / (up / 1000)).toFixed(2)} MB/s, download ${(6 / (down / 1000)).toFixed(2)} MB/s`);
+const blob = name => ({ name, arrayBuffer: async () => new TextEncoder().encode("hello").buffer });
+await uploadFile(fast, blob("my clip.mp4"));
+await uploadFile(fast, blob("my clip.mp4"));
+let files = await listFiles(agent);
+assert.deepEqual(files.map(f => f.name).sort(), ["big.bin", "my clip (2).mp4", "my clip.mp4"]);
+assert.equal(files.find(f => f.name === "my clip.mp4").size, 5);
+await deleteFile(agent, "/root/Files/my clip (2).mp4");
+assert.equal((await listFiles(agent)).length, 2);
+// stdin pipe: empty input and EOF handling
+const s = agent.open({ script: "wc -c", pty: false, stdin: true });
+let out = ""; s.onData = b => { out += Buffer.from(b).toString(); };
+s.end();
+assert.equal(await s.exited, 0); assert.equal(out.trim(), "0");
+console.log("ALL OK");
+await vm.stop();
+process.exit(0);

@@ -40,6 +40,8 @@ const GUI_PYTHON = ["pyqt5", "pyqt6", "pyside2", "pyside6", "pygame", "kivy", "w
 const PYTHON_WEB = { streamlit: 8501, gradio: 7860, flask: 5000, fastapi: 8000, uvicorn: 8000, django: 8000, dash: 8050, nicegui: 8080, chainlit: 8000, bottle: 8080, sanic: 8000 };
 const NODE_WEB = { next: 3000, vite: 5173, express: 3000, fastify: 3000, koa: 3000, nuxt: 3000, hono: 3000, astro: 4321, "@sveltejs/kit": 5173, "react-scripts": 3000, "http-server": 8080, "socket.io": 3000 };
 const GUI_NODE = ["electron", "@tauri-apps/api", "@tauri-apps/cli", "nw", "react-native", "expo"];
+// Tools that drive a full desktop browser engine, which the emulator can't run.
+const BROWSER_NODE = ["puppeteer", "puppeteer-core", "playwright", "playwright-core", "@playwright/test", "@remotion/renderer", "remotion"];
 const NEEDS_WEBSOCKET = ["streamlit", "gradio", "chainlit", "nicegui", "socket.io", "vite", "next"];
 
 const normalize = name => name.toLowerCase().replace(/[._]+/g, "-");
@@ -265,6 +267,8 @@ function planNode(facts, plan, cmds) {
 
   const gui = GUI_NODE.filter(d => deps[d]);
   if (gui.length) plan.warnings.push({ level: "block", text: `This is a desktop or mobile app (${gui.join(", ")}), which can't display here.` });
+  const browser = BROWSER_NODE.filter(d => deps[d]);
+  if (browser.length) plan.warnings.push({ level: "block", text: `It renders with a full desktop browser engine (${browser.join(", ")}), which can't run inside Dock's Linux. It needs a real computer or a cloud server.` });
   if (pkg.workspaces) plan.warnings.push({ level: "warn", text: "This repository holds several packages; Dock installs the top-level one only." });
 
   const source = [cloneStep(facts), { title: "Install its Node.js packages", cmd: `cd "$SRC" && ${NPM} install --no-audit --no-fund${scripts.build ? "" : " --omit=dev"}` }];
@@ -321,6 +325,19 @@ function planCompiled(facts, plan, language) {
   // The package name is not always the command name (ripgrep installs "rg").
   plan.discover = `apk info -qL ${q(name)} 2>/dev/null | grep -E '^usr/(local/)?s?bin/' | xargs -rn1 basename`;
   plan.warnings.push({ level: "warn", text: `${language === "go" ? "Go" : "Rust"} projects must be compiled. Dock first looks for a ready-made Alpine package; if there isn't one, compiling on the phone can take a very long time.` });
+}
+
+// C and C++ projects (FFmpeg, ImageMagick, jq...) can't sensibly be compiled inside the
+// emulator, but the well-known ones are packaged by Alpine under the repository's name.
+function planNative(facts, plan) {
+  const name = facts.repo.toLowerCase();
+  plan.runtime = "native";
+  plan.name = facts.repo;
+  plan.method = "Alpine package";
+  plan.steps = [{ title: `Install the prebuilt ${name} package`, cmd: `apk add --no-cache ${q(name)}` }];
+  plan.uninstall = `apk del ${q(name)} 2>/dev/null; true`;
+  plan.discover = `apk info -qL ${q(name)} 2>/dev/null | grep -E '^usr/(local/)?s?bin/' | xargs -rn1 basename`;
+  plan.warnings.push({ level: "warn", text: "This project is written in C or C++. Dock installs the ready-made Alpine Linux build of it; if Alpine doesn't carry one, it can't be installed here." });
 }
 
 function planSkill(facts, plan) {
@@ -392,6 +409,8 @@ export function buildPlan(facts) {
     planCompiled(facts, plan, "go");
   } else if (files["Cargo.toml"]) {
     planCompiled(facts, plan, "rust");
+  } else if (files["configure"] || files["CMakeLists.txt"] || files["meson.build"]) {
+    planNative(facts, plan);
   } else {
     planFromReadme(facts, plan, cmds);
   }
@@ -409,6 +428,13 @@ export function buildPlan(facts) {
 
 function planFromReadme(facts, plan, cmds) {
   const files = facts.files;
+  const name = facts.repo.toLowerCase();
+  const looksNative = !!files["Makefile"] || new RegExp(`\\b(?:apt(?:-get)?|brew|dnf|pacman|apk|choco|scoop) (?:install|add|-S)\\b[^\\n]*\\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(readme(facts));
+  if (looksNative && /^[a-z0-9][a-z0-9+._-]*$/.test(name)) {
+    // Programs installed with a system package manager are usually in Alpine too.
+    planNative(facts, plan);
+    return;
+  }
   plan.method = "README instructions";
   plan.steps = [cloneStep(facts)];
   const seen = new Set();

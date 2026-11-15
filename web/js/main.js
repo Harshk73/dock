@@ -10,6 +10,8 @@ import { runInstall, runUninstall, writeAppRecord, readAppRecords, InstallCancel
 import { TerminalManager, createScreen } from "./terminal.js";
 import { Drive } from "./drive.js";
 import { installPreviewBridge, probePort } from "./preview.js";
+import { openWorkspace, forgetWorkspace } from "./workspace.js";
+import { findRecipe } from "./recipes.js";
 
 const $ = id => document.getElementById(id);
 // append() that skips empty values and flattens lists (DOM append would print "null").
@@ -18,12 +20,12 @@ const MIB = 1 << 20;
 const SUGGESTIONS = [
   ["yt-dlp", "yt-dlp/yt-dlp"], ["cowsay", "piuccio/cowsay"], ["ripgrep", "BurntSushi/ripgrep"], ["Agent skills", "anthropics/skills"],
 ];
-const RUNTIME_LABEL = { python: "Python", node: "Node.js", go: "Go", rust: "Rust", skill: "Skills", unknown: "Source" };
+const RUNTIME_LABEL = { python: "Python", node: "Node.js", go: "Go", rust: "Rust", native: "C / C++", skill: "Skills", unknown: "Source" };
 const KIND_LABEL = { cli: "Command-line tool", web: "Web app", skill: "Agent skills", mcp: "MCP server", source: "Source only" };
 
 const state = {
   // Phones give a web page far less memory than a desktop browser does.
-  settings: { relayBase: "", memoryMB: /iPhone|iPad|iPod|Android/.test(navigator.userAgent) ? 384 : 512, googleClientId: "", githubToken: "" },
+  settings: { relayBase: "", memoryMB: /iPhone|iPad|iPod|Android/.test(navigator.userAgent) ? 384 : 512, googleClientId: "", githubToken: "", anthropicKey: "" },
   apps: [],
   vm: { machine: null, disk: null, manifest: null, status: "off", error: null, bootLog: "", waiters: [] },
   installs: new Map(),
@@ -401,6 +403,7 @@ function openInstallSheet(install) {
     put(head, 
       h("div", { class: "sheet-title" }, appIcon(app), h("div", {}, h("h2", {}, title), h("p", { class: "muted" }, `${install.method} · ${app.owner}/${app.repo}`))),
       install.status === "failed" ? notice("block", install.error || "Something went wrong.") : null,
+      install.status === "done" && findRecipe(app) && findRecipe(app).sites ? notice("info", `Works with ${findRecipe(app).sites.map(site => site.name).join(", ")}${findRecipe(app).sitesNote ? " " + findRecipe(app).sitesNote : ""}.`) : null,
       install.status === "running" ? h("p", { class: "muted small", style: "margin:-4px 2px 12px" }, "This runs inside an emulated computer, so it's slower than a laptop. You can hide this and keep using Dock.") : null,
       stepList(install.steps),
     );
@@ -432,8 +435,18 @@ function openInstallSheet(install) {
 // ------------------------------------------------------------------ installed apps
 
 function openLabel(app) {
-  return { web: "Start", skill: "View skills", source: "Open folder" }[app.kind] || "Open in Terminal";
+  const recipe = findRecipe(app);
+  if (recipe && recipe.sites && recipe.sites[0]) return `Open ${recipe.sites[0].name}`;
+  return "Open";
 }
+
+const workspaceContext = {
+  machine: () => (state.vm.status === "ready" ? state.vm.machine : null),
+  get settings() { return state.settings; },
+  saveSettings,
+  openTerminal: app => openInTerminal(app),
+  startWebApp: app => startWebApp(app),
+};
 
 function openAppSheet(app) {
   const sheet = openSheet();
@@ -475,6 +488,7 @@ async function removeApp(app) {
   if (a) await runUninstall(a, app).catch(() => {});
   state.apps = state.apps.filter(x => x.id !== app.id);
   state.installs.delete(app.id);
+  forgetWorkspace(app.id);
   await appStore.delete(app.id);
   renderDock();
   if (state.vm.machine) await state.vm.machine.save().catch(() => {});
@@ -486,20 +500,22 @@ function appEnv(app) {
   return `export APP=/dock/apps/${app.id} SRC=/dock/apps/${app.id}/src\n`;
 }
 
-async function openApp(app) {
+function openApp(app) {
+  openWorkspace(workspaceContext, app);
+}
+
+function openInTerminal(app) {
   const a = agent();
   if (!a) {
     toast(state.vm.status === "booting" ? "Linux is still starting. Try again in a moment." : "Linux isn't running.");
     return;
   }
-  if (app.kind === "skill") return openSkills(app);
-  if (app.kind === "web" && app.launch) return startWebApp(app);
   if (app.launchLabel && app.launch) {
     terminals.open({ title: app.name, script: appEnv(app) + app.launch });
   } else if (app.launch) {
     terminals.open({ title: app.name, pretype: app.launch + " " });
   } else {
-    terminals.open({ title: app.name, pretype: `cd /dock/apps/${app.id}/src && ls\n` });
+    terminals.open({ title: app.name, pretype: `cd /dock/apps/${app.id}${app.kind === "skill" ? "/skills" : "/src"} && ls\n` });
   }
   switchView("terminal");
 }
@@ -540,27 +556,6 @@ function openPreview(app) {
       h("button", { class: "icon-btn", type: "button", "aria-label": "Reload", html: ICONS.reload, onclick: () => { frame.src = frame.src; } })),
     frame);
   put($("app"), view);
-}
-
-async function openSkills(app) {
-  const a = agent();
-  const sheet = openSheet({ full: true });
-  put(sheet.body, h("div", { class: "sheet-title" }, appIcon(app), h("div", {}, h("h2", {}, app.name), h("p", { class: "muted" }, "Skills are linked into ~/.claude/skills"))));
-  const list = h("div", { class: "rows" }, h("div", { class: "row" }, h("span", { class: "muted" }, "Loading…")));
-  put(sheet.body, list);
-  put(sheet.foot, h("button", { class: "btn", type: "button", onclick: () => sheet.close() }, "Done"));
-  const { text } = await a.capture(`cd /dock/apps/${app.id}/skills 2>/dev/null && for d in */; do n=\${d%/}; desc=$(sed -n 's/^description: *//p' "$n/SKILL.md" | head -1); printf '%s\\t%s\\n' "$n" "$desc"; done`);
-  list.textContent = "";
-  const rows = text.split("\n").filter(Boolean).map(line => line.split("\t"));
-  if (!rows.length) put(list, h("div", { class: "row" }, h("span", { class: "muted" }, "No skills found in this repository.")));
-  for (const [name, desc] of rows) {
-    put(list, h("button", { class: "row", type: "button", onclick: async () => {
-      const detail = openSheet({ full: true });
-      const { text: body } = await a.capture(`head -c 20000 /dock/apps/${app.id}/skills/${name}/SKILL.md`);
-      put(detail.body, h("h2", { style: "margin:6px 0 12px" }, name), h("pre", { class: "mono", style: "white-space:pre-wrap;font-size:13px;color:#c9ccd8;margin:0" }, body));
-      put(detail.foot, h("button", { class: "btn", type: "button", onclick: () => detail.close() }, "Close"));
-    } }, h("div", { class: "row-main" }, h("span", {}, name), h("span", { class: "muted" }, (desc || "").replace(/^["']|["']$/g, "").slice(0, 110)))));
-  }
 }
 
 // ------------------------------------------------------------------ Google Drive
@@ -722,6 +717,10 @@ async function renderSettings() {
       inputRow("GitHub token (optional)", "Only needed for private repositories or if GitHub limits how often you can look up repositories.", state.settings.githubToken,
         { type: "password", placeholder: "github_pat_…", onchange: v => saveSettings({ githubToken: v }) }),
     )),
+    h("div", { class: "group" }, h("h3", {}, "Ask AI"), h("div", { class: "rows" },
+      inputRow("Anthropic API key", "Lets an AI run your installed tools and skills for you. Stored on this phone only; you pay Anthropic for usage.", state.settings.anthropicKey,
+        { type: "password", placeholder: "sk-ant-…", onchange: v => saveSettings({ anthropicKey: v }) }),
+    )),
     h("div", { class: "group" }, h("h3", {}, "About"), h("div", { class: "rows" },
       row("How it works", "Dock runs a small 32-bit Alpine Linux in an emulator on this phone. Tools that install with pip, npm or apk generally work; things that need Docker, a GPU, a desktop window or lots of compiling don't."),
       row("Speed", "Everything is emulated, so installs take minutes rather than seconds."),
@@ -866,7 +865,7 @@ async function init() {
   }
 }
 
-window.dock = { state, get drive() { return drive; }, get terminals() { return terminals; }, runBackup, analyze, openPreview };
+window.dock = { state, openApp, get drive() { return drive; }, get terminals() { return terminals; }, runBackup, analyze, openPreview };
 init().catch(err => {
   console.error(err);
   toast("Dock could not start: " + err.message, 8000);

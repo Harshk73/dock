@@ -7,7 +7,7 @@
 const PROBE_FILES = [
   "README.md", "readme.md", "README.rst", "README",
   "package.json", "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt",
-  "Cargo.toml", "go.mod", "Makefile", "install.sh", "Dockerfile", "docker-compose.yml",
+  "Cargo.toml", "go.mod", "Makefile", "configure", "CMakeLists.txt", "meson.build", "install.sh", "Dockerfile", "docker-compose.yml",
   "SKILL.md", ".claude-plugin/plugin.json", ".claude-plugin/marketplace.json",
   "main.py", "app.py", "manage.py",
 ];

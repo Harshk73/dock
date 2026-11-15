@@ -1,6 +1,7 @@
 // Boots and owns the emulator. Works in the browser and (for tests) in Node.
 
 import { GuestAgent } from "./agent.js";
+import { HostBridge } from "./bridge.js";
 
 const DOH_HOST = "dock-relay.invalid";
 let dohTarget = null;
@@ -37,6 +38,7 @@ export class Machine {
     this.flowControl = false;
     this.emulator = null;
     this.agent = null;
+    this.bridge = null; // fast file transfer between page and VM (see bridge.js)
   }
 
   on(event, fn) {
@@ -102,6 +104,7 @@ export class Machine {
     });
 
     await this.agent.ready;
+    this.bridge = netDevice ? new HostBridge(emulator.network_adapter) : null;
     if (netDevice && this.flowControl) this.startFlowControl();
     this.setState("ready");
   }
