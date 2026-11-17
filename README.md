@@ -54,7 +54,31 @@ embedded as a whole site). So Dock shows its own view: search results come from 
 and the video plays in YouTube's official embedded player. A native iOS build could show
 the real site with Dock's buttons over it.
 
-## Run it
+## Install it on your iPhone
+
+Dock is not in the App Store. You put it online once (free), then add it to your home
+screen from Safari.
+
+1. **Put it online.** Click the button below, sign in to Render with GitHub, and press
+   **Apply**. Render builds Dock from this repository and gives you an address such as
+   `https://dock-xxxx.onrender.com`.
+
+   [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Harshk73/dock)
+
+   (Or in Render: **New +** → **Blueprint** → pick this repository. `render.yaml` holds
+   the settings.) On the free plan the server sleeps when unused, so the first visit after
+   a break takes about a minute.
+2. **Add it to the phone.** Open that address in **Safari**, tap **Share** →
+   **Add to Home Screen** → **Add**. It must be Safari: other iPhone browsers can't add
+   installable web apps.
+3. **Open Dock** from the new icon. "Linux ready" appears after a short wait (longer the
+   first time, while about 90 MB downloads). Try **ripgrep** from the suggestions first:
+   it installs in seconds.
+
+Anywhere else that runs Docker works too: `Dockerfile` is included and listens on
+`$PORT` (8080). iPhones need the address to be **HTTPS**.
+
+To try it on a computer instead:
 
 ```bash
 npm install
@@ -64,14 +88,7 @@ npm install
 npm start
 ```
 
-Open http://localhost:8080. To use it on an iPhone it must be served over **HTTPS** (iOS
-requires that for installable apps and their storage), so deploy it:
-
-- **Render**: push this folder to a GitHub repository, then New → Blueprint in Render and
-  pick the repo (`render.yaml` is included).
-- **Anywhere Docker runs**: `Dockerfile` is included; it listens on `$PORT` (8080).
-
-Then on the iPhone: open the address in Safari → Share → **Add to Home Screen**.
+Then open http://localhost:8080.
 
 ### Settings to change when you deploy
 
