@@ -23,9 +23,15 @@ const SUGGESTIONS = [
 const RUNTIME_LABEL = { python: "Python", node: "Node.js", go: "Go", rust: "Rust", native: "C / C++", skill: "Skills", unknown: "Source" };
 const KIND_LABEL = { cli: "Command-line tool", web: "Web app", skill: "Agent skills", mcp: "MCP server", source: "Source only" };
 
+// iPadOS reports itself as a Mac; touch support gives it away.
+const IS_PHONE = /iPhone|iPad|iPod|Android/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+// Memory sizes Dock steps down through when a device can't allocate the one asked for.
+const MEMORY_STEPS = [1024, 768, 512, 384, 256, 192, 128];
+const STAGE_LABEL = { connect: "Connecting", download: "Downloading", kernel: "Starting kernel", disk: "Loading disk", services: "Almost ready", ready: "Linux ready" };
+
 const state = {
   // Phones give a web page far less memory than a desktop browser does.
-  settings: { relayBase: "", memoryMB: /iPhone|iPad|iPod|Android/.test(navigator.userAgent) ? 384 : 512, googleClientId: "", githubToken: "", anthropicKey: "" },
+  settings: { relayBase: "", memoryMB: IS_PHONE ? 256 : 512, googleClientId: "", githubToken: "", anthropicKey: "" },
   apps: [],
   vm: { machine: null, disk: null, manifest: null, status: "off", error: null, bootLog: "", waiters: [] },
   installs: new Map(),
@@ -56,14 +62,56 @@ function setVmStatus(status, error = null) {
   pill.dataset.state = status;
   $("vm-pill-text").textContent = { off: "Off", booting: "Starting Linux", ready: "Linux ready", error: "Linux stopped" }[status];
   $("term-empty-text").textContent = status === "ready" ? "Tap + to open a terminal."
-    : status === "error" ? "Linux isn't running. Open the status pill on the Dock tab to restart it."
+    : status === "error" ? `Linux couldn't start. ${(error && error.message) || ""} Tap the status button on the Dock tab for details.`
       : "Linux is starting…";
+  if (status !== "booting") $("boot-log").textContent = status === "error" ? cleanLog(state.vm.machine ? state.vm.machine.progress.log : "").slice(-2500) : "";
   if (status === "ready" || status === "error") {
     const waiters = state.vm.waiters;
     state.vm.waiters = [];
     for (const w of waiters) status === "ready" ? w.resolve() : w.reject(error || new Error("Linux could not start."));
   }
   if (state.view === "settings") renderSettings();
+}
+
+const cleanLog = text => String(text || "").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").replace(/\r/g, "");
+
+// Start-up progress, shown on the status button and in the Terminal tab.
+function showBootProgress(progress) {
+  if (state.vm.status !== "booting") return;
+  const label = STAGE_LABEL[progress.stage] || "Starting Linux";
+  const seconds = Math.round((Date.now() - progress.startedAt) / 1000);
+  $("vm-pill-text").textContent = progress.percent !== null && progress.stage === "download" ? `${label} ${progress.percent}%` : label;
+  $("term-empty-text").textContent = `${progress.detail || "Linux is starting"}${progress.percent !== null && progress.stage === "download" ? ` · ${progress.percent}%` : ""} · ${seconds}s`;
+  $("boot-log").textContent = cleanLog(progress.log).split("\n").slice(-14).join("\n");
+}
+
+/** Everything useful for working out why Linux didn't start, as plain text to paste. */
+function diagnostics() {
+  const vm = state.vm;
+  const p = vm.machine ? vm.machine.progress : null;
+  const err = vm.error;
+  let simd = "unknown";
+  try {
+    simd = String(WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11])));
+  } catch { simd = "no WebAssembly"; }
+  const lines = [
+    "Dock diagnostics",
+    `time: ${new Date().toISOString()}`,
+    `browser: ${navigator.userAgent}`,
+    `home-screen app: ${!!(navigator.standalone || matchMedia("(display-mode: standalone)").matches)}`,
+    `device memory hint: ${navigator.deviceMemory || "n/a"} GB · wasm simd: ${simd}`,
+    `linux memory: ${state.settings.memoryMB} MB · status: ${vm.status}`,
+    `image: ${vm.manifest ? vm.manifest.version : "?"}`,
+  ];
+  if (p) {
+    lines.push(`stage: ${p.stage} (${p.detail || ""}${p.percent !== null ? ` ${p.percent}%` : ""})`);
+    lines.push(`elapsed: ${Math.round(((p.readyAt || Date.now()) - p.startedAt) / 1000)}s`);
+    if (vm.disk) lines.push(`disk: ${JSON.stringify(vm.disk.stats)}`);
+    if (p.errors.length) lines.push(`page errors: ${p.errors.slice(-5).join(" | ")}`);
+  }
+  if (err) lines.push(`error: [${err.code || err.name}] ${err.message}${err.cause ? ` (cause: ${err.cause.message || err.cause})` : ""}`);
+  lines.push("--- boot log ---", cleanLog(p ? p.log : vm.bootLog).slice(-3000));
+  return lines.join("\n");
 }
 
 function vmReady() {
@@ -78,23 +126,54 @@ async function bootVm() {
   setVmStatus("booting");
   state.vm.bootLog = "";
   const decoder = new TextDecoder();
+  let machine = null;
   try {
-    const { machine, disk, manifest } = await createVm({ relayBase: relayBase(), memoryMB: state.settings.memoryMB });
-    Object.assign(state.vm, { machine, disk, manifest });
+    const created = await createVm({ relayBase: relayBase(), memoryMB: state.settings.memoryMB });
+    machine = created.machine;
+    Object.assign(state.vm, created);
     machine.on("console", bytes => {
       state.vm.bootLog = (state.vm.bootLog + decoder.decode(bytes)).slice(-20000);
     });
-    const slow = setTimeout(() => {
-      if (state.vm.status === "booting") toast("Linux is taking a while to start. Older phones can need a minute or two.", 5000);
-    }, 90000);
-    await machine.boot();
-    clearTimeout(slow);
+    let lastDraw = 0;
+    machine.on("progress", progress => {
+      if (Date.now() - lastDraw > 250) { lastDraw = Date.now(); showBootProgress(progress); }
+    });
+    machine.on("console", () => {
+      if (Date.now() - lastDraw > 400) { lastDraw = Date.now(); showBootProgress(machine.progress); }
+    });
+    const ticker = setInterval(() => showBootProgress(machine.progress), 1000);
+    try {
+      await machine.boot();
+    } finally {
+      clearInterval(ticker);
+    }
     machine.agent.onRestart = () => terminals.reset();
     setVmStatus("ready");
+    const lowered = await kv.get("boot.lowered", null);
+    if (lowered) {
+      toast(`Linux now uses ${lowered.to} MB of memory so it fits on this device.`, 5000);
+      await kv.delete("boot.lowered");
+    }
+    await kv.set("boot.everReady", true);
     reconcileApps().catch(() => {});
     updateStorage();
   } catch (err) {
     console.error(err);
+    if (machine) await machine.discard();
+    // Not enough memory: try again with less, in a fresh page so the failed attempt's
+    // memory is really gone.
+    const lower = MEMORY_STEPS.find(mb => mb < state.settings.memoryMB);
+    if (err.code === "memory" && lower) {
+      const lowered = await kv.get("boot.lowered", null);
+      await kv.set("boot.lowered", { from: lowered ? lowered.from : state.settings.memoryMB, to: lower });
+      await saveSettings({ memoryMB: lower });
+      $("vm-pill-text").textContent = `Retrying with ${lower} MB`;
+      setTimeout(() => location.reload(), 600);
+      return;
+    }
+    if (err.code === "memory") {
+      err.message = `This device couldn't give Linux enough memory, even at ${state.settings.memoryMB} MB. Close other Safari tabs and apps, then tap Try again.`;
+    }
     setVmStatus("error", err);
     if (err.code === "base-changed") {
       const erase = await confirmSheet({
@@ -701,7 +780,7 @@ async function renderSettings() {
       row("Disk used on this phone", null, formatBytes(chunks * MIB)),
       h("div", { class: "row" }, h("div", { class: "row-main" }, h("span", {}, "Memory"), h("span", { class: "muted" }, "Takes effect when Linux restarts")),
         (() => {
-          const select = h("select", { "aria-label": "Memory" }, [256, 384, 512, 768, 1024].map(mb => h("option", { value: mb, selected: mb === state.settings.memoryMB }, `${mb} MB`)));
+          const select = h("select", { "aria-label": "Memory" }, [...MEMORY_STEPS].reverse().map(mb => h("option", { value: mb, selected: mb === state.settings.memoryMB }, `${mb} MB`)));
           select.addEventListener("change", () => saveSettings({ memoryMB: Number(select.value) }));
           return select;
         })()),
@@ -730,18 +809,35 @@ async function renderSettings() {
 
 function openVmSheet() {
   const vm = state.vm;
-  const sheet = openSheet();
-  const titles = { off: "Linux is off", booting: "Linux is starting", ready: "Linux is running", error: "Linux stopped" };
-  put(sheet.body, 
-    h("h2", { style: "margin:6px 0 8px" }, titles[vm.status]),
-    h("p", { class: "desc" }, vm.status === "error" ? (vm.error && vm.error.message) || "Something went wrong while starting."
-      : vm.status === "booting" ? "A small Linux computer is booting inside this app. It usually takes under a minute."
-        : `Alpine Linux${vm.machine && vm.machine.agent.info ? ` · kernel ${vm.machine.agent.info.kernel}` : ""} · ${state.settings.memoryMB} MB memory`),
-    vm.bootLog ? h("pre", { class: "mono log", style: "white-space:pre-wrap;font-size:11px;color:#9498a8;overflow:auto;margin:0 0 12px" }, vm.bootLog.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").slice(-3000)) : null,
-  );
-  put(sheet.foot, 
-    h("button", { class: "btn", type: "button", onclick: () => sheet.close() }, "Close"),
-    h("button", { class: "btn primary", type: "button", onclick: async () => { sheet.close(); toast("Restarting Linux…"); await restartVm(); } }, vm.status === "ready" ? "Restart" : "Start again"),
+  let timer = null;
+  const sheet = openSheet({ onClose: () => clearInterval(timer) });
+  const titles = { off: "Linux is off", booting: "Linux is starting", ready: "Linux is running", error: "Linux couldn't start" };
+  const desc = h("p", { class: "desc" });
+  const log = h("pre", { class: "mono log", style: "white-space:pre-wrap;font-size:11px;color:#9498a8;overflow:auto;margin:0 0 12px" });
+  const draw = () => {
+    const p = vm.machine ? vm.machine.progress : null;
+    desc.textContent = vm.status === "error" ? (vm.error && vm.error.message) || "Something went wrong while starting."
+      : vm.status === "booting" ? `${p && p.detail ? p.detail : "Starting"}${p && p.percent !== null && p.stage === "download" ? ` · ${p.percent}%` : ""}${p && p.startedAt ? ` · ${Math.round((Date.now() - p.startedAt) / 1000)}s` : ""}. A small Linux computer is booting inside this app; on a phone this usually takes one to three minutes.`
+        : `Alpine Linux${vm.machine && vm.machine.agent && vm.machine.agent.info ? ` · kernel ${vm.machine.agent.info.kernel}` : ""} · ${state.settings.memoryMB} MB memory`;
+    log.textContent = cleanLog(p ? p.log : vm.bootLog).slice(-3000) || "(no messages from Linux yet)";
+  };
+  draw();
+  if (vm.status === "booting") timer = setInterval(draw, 1000);
+  put(sheet.body, h("h2", { style: "margin:6px 0 8px" }, titles[vm.status]), desc, log,
+    vm.status === "error" ? h("p", { class: "muted small", style: "margin:-4px 2px 10px" }, "If trying again doesn't help, tap Copy details and send the text to whoever is helping you.") : null);
+  put(sheet.foot,
+    h("button", { class: "btn", type: "button", onclick: async () => {
+      try {
+        await navigator.clipboard.writeText(diagnostics());
+        toast("Details copied");
+      } catch {
+        // Clipboard refused: show the text so it can be selected by hand.
+        log.textContent = diagnostics();
+        log.style.userSelect = "text";
+        clearInterval(timer);
+      }
+    } }, "Copy details"),
+    h("button", { class: "btn primary", type: "button", onclick: async () => { sheet.close(); toast("Restarting Linux…"); await restartVm(); } }, vm.status === "ready" ? "Restart" : "Try again"),
   );
 }
 
@@ -782,6 +878,9 @@ async function init() {
   const saved = await kv.get("settings", {});
   Object.assign(state.settings, Object.fromEntries(Object.entries(config).filter(([, v]) => v)), saved);
   if (!await kv.get("disk.id")) await kv.set("disk.id", crypto.randomUUID());
+  // Earlier versions asked phones for more memory than many can give. Until Linux has
+  // started once on this device, use the phone default.
+  if (IS_PHONE && state.settings.memoryMB > 256 && !await kv.get("boot.everReady", false)) state.settings.memoryMB = 256;
 
   terminals = new TerminalManager({ stack: $("term-stack"), tabs: $("term-tabs"), keybar: $("keybar"), empty: $("term-empty"), getAgent: agent });
   let endpoints;
@@ -865,7 +964,7 @@ async function init() {
   }
 }
 
-window.dock = { state, openApp, get drive() { return drive; }, get terminals() { return terminals; }, runBackup, analyze, openPreview };
+window.dock = { state, openApp, diagnostics, get drive() { return drive; }, get terminals() { return terminals; }, runBackup, analyze, openPreview };
 init().catch(err => {
   console.error(err);
   toast("Dock could not start: " + err.message, 8000);

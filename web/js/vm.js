@@ -3,7 +3,7 @@
 
 import { V86 } from "../vendor/libv86.mjs";
 import { ChunkDisk } from "./disk.js";
-import { Machine } from "./machine.js";
+import { Machine, checkBrowserSupport } from "./machine.js";
 import { overlay, kv } from "./store.js";
 
 async function gunzip(bytes) {
@@ -48,6 +48,7 @@ export class BaseChangedError extends Error {
  * @returns {Promise<{machine: Machine, disk: ChunkDisk, manifest: object}>}
  */
 export async function createVm(settings) {
+  checkBrowserSupport();
   const manifest = await (await fetch("vm/disk/manifest.json", { cache: "no-cache" })).json();
   const savedVersion = await kv.get("disk.baseVersion");
   if (savedVersion && savedVersion !== manifest.version && await overlay.count()) {

@@ -416,3 +416,8 @@ h2 { font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
   padding: 11px 16px; font: 16px/1.35 var(--font); color: var(--text); outline: 0; }
 .chat-bar textarea:focus { border-color: rgba(139, 123, 255, 0.7); }
 .chat-bar .addbar-go { width: 44px; height: 44px; border-radius: 50%; }
+
+/* Live messages from Linux while it starts (Terminal tab). */
+.term-empty { align-content: center; gap: 12px; }
+#boot-log { margin: 0; max-width: 100%; max-height: 45vh; overflow: hidden; text-align: left; font: 10.5px/1.4 var(--mono); color: #6f7487; white-space: pre-wrap; word-break: break-word; }
+#boot-log:empty { display: none; }

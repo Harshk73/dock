@@ -14,6 +14,8 @@ fs.writeFileSync(path.join(out, "libv86.mjs"), v86);
 
 const copies = [
   [nm("v86", "build", "v86.wasm"), "v86.wasm"],
+  // Loaded by the emulator itself when a browser can't run v86.wasm (no SIMD support).
+  [nm("v86", "build", "v86-fallback.wasm"), "v86-fallback.wasm"],
   [nm("v86", "LICENSE"), "v86.LICENSE.txt"],
   [nm("@xterm", "xterm", "lib", "xterm.mjs"), "xterm.mjs"],
   [nm("@xterm", "xterm", "css", "xterm.css"), "xterm.css"],

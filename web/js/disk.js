@@ -35,6 +35,7 @@ export class ChunkDisk {
     this.overlayKeys = new Set();
     this.pinned = new Map();
     this.onload = undefined;
+    this.onerror = undefined; // (err) => void, when a chunk can't be loaded
     this.onactivity = undefined; // (kind: "read"|"write", bytes) => void
     this.stats = { baseLoads: 0, overlayLoads: 0, remoteLoads: 0, writes: 0, flushes: 0 };
   }
@@ -51,6 +52,7 @@ export class ChunkDisk {
   get(offset, len, fn) {
     this.read(offset, len).then(fn, err => {
       console.error("disk read failed", err);
+      if (this.onerror) this.onerror(err);
       fn(new Uint8Array(len));
     });
   }
@@ -68,6 +70,9 @@ export class ChunkDisk {
     this.read(offset, len).then(data => {
       this.pinned.set(offset + ":" + len, data);
       fn(data);
+    }, err => {
+      console.error("disk read failed", err);
+      if (this.onerror) this.onerror(err);
     });
   }
 

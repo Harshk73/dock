@@ -19,7 +19,7 @@ export class DirOverlay {
   putMany(entries) { for (const [i, chunk] of entries) fs.writeFileSync(path.join(this.dir, String(i)), chunk); return Promise.resolve(); }
 }
 
-export async function startVm({ overlay = new MemoryOverlay(), memoryMB = 512, echo = false } = {}) {
+export async function startVm({ overlay = new MemoryOverlay(), memoryMB = 512, echo = false, loadBase = null, stallMs = undefined } = {}) {
   // In the build sandbox every outbound connection must go through its HTTPS proxy.
   const upstream = process.env.HTTPS_PROXY ? new URL(process.env.HTTPS_PROXY) : null;
   const relay = createRelay({
@@ -33,7 +33,7 @@ export async function startVm({ overlay = new MemoryOverlay(), memoryMB = 512, e
     size: manifest.size,
     chunkSize: manifest.chunkSize,
     basePresent: manifest.present,
-    loadBase: async i => new Uint8Array(zlib.gunzipSync(fs.readFileSync(path.join(VM, "disk", `${i}.gz`)))),
+    loadBase: loadBase || (async i => new Uint8Array(zlib.gunzipSync(fs.readFileSync(path.join(VM, "disk", `${i}.gz`))))),
     overlay,
     maxCleanChunks: 400,
   });
@@ -49,6 +49,7 @@ export async function startVm({ overlay = new MemoryOverlay(), memoryMB = 512, e
     cmdline: manifest.cmdline,
     disk,
     memoryMB,
+    stallMs,
     relayBase: `http://127.0.0.1:${port}${relay.prefix}`,
   });
   let consoleText = "";
