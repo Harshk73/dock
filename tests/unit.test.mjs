@@ -49,7 +49,7 @@ test("heavy ML and desktop GUI projects are flagged", () => {
 
 test("node CLI published on npm installs globally; unpublished builds from source", () => {
   const pkg = JSON.stringify({ name: "@acme/tool", bin: { tool: "cli.js" }, dependencies: { "@modelcontextprotocol/sdk": "1" } });
-  const published = buildPlan(facts({ "package.json": pkg }, { npm: { name: "@acme/tool", bin: { tool: "cli.js" }, matchesRepo: true } }));
+  const published = buildPlan(facts({ "package.json": pkg, "README.md": "# Tool\nAn MCP server for acme.\n" }, { npm: { name: "@acme/tool", bin: { tool: "cli.js" }, matchesRepo: true } }));
   assert.equal(published.method, "npm release");
   assert.match(published.steps[0].cmd, /npm install -g .*'@acme\/tool'/);
   assert.equal(published.launch, "tool");
@@ -193,4 +193,75 @@ test("time and name helpers", () => {
   assert.equal(formatDuration(3723), "1:02:03");
   assert.equal(outputName("/root/Files/a.b.mp4", "trim"), "a.b-trim.mp4");
   assert.equal(outputName("/root/Files/clip.mov", "audio", "m4a"), "clip-audio.m4a");
+});
+
+// ---------------------------------------------------------------- phone compatibility
+import { assessCompatibility, readmeProse } from "../web/js/compat.js";
+
+const verdict = (files, extra = {}, context = {}) => {
+  const f = facts(files, extra);
+  return assessCompatibility(f, buildPlan(f), context);
+};
+
+test("compatibility: tools that should work", () => {
+  const pypi = verdict({ "pyproject.toml": '[project]\nname = "tool"\n', "README.md": "# Tool\n```\npip install tool\n```\n" }, { pypi: { name: "tool", requires: [], matchesRepo: true } });
+  assert.equal(pypi.level, "good");
+  assert.match(pypi.detail, /1–3 minutes/);
+  const alpine = verdict({ "Cargo.toml": "[package]", "README.md": "fast grep" }, { apk: { found: true, match: "repository", name: "ripgrep", version: "15.1.0-r0", commands: ["rg"] } });
+  assert.equal(alpine.level, "good");
+  assert.match(alpine.reasons[0].text, /ripgrep 15\.1\.0-r0/);
+});
+
+test("compatibility: Alpine package turns a guess into an exact plan", () => {
+  const f = facts({ "README.md": "jq is a JSON processor\n```\n./configure && make\n```" }, { apk: { found: true, match: "repository", name: "jq", version: "1.8", commands: ["jq"] } });
+  const plan = buildPlan(f);
+  assert.equal(plan.method, "Alpine package");
+  assert.deepEqual(plan.bins, ["jq"]);
+  assert.equal(plan.launch, "jq");
+  assert.equal(plan.steps[0].cmd, "apk add --no-cache 'jq'");
+  const missing = buildPlan(facts({ "Cargo.toml": "[package]" }, { apk: { found: false } }));
+  assert.equal(missing.method, "Compile from source");
+  assert.equal(assessCompatibility(facts({ "Cargo.toml": "[package]" }, { apk: { found: false } }), missing).level, "no");
+});
+
+test("compatibility: things a phone can't provide, with the README line quoted", () => {
+  const gpu = verdict({ "requirements.txt": "flask\n", "README.md": "# Gen\nYou need an NVIDIA GPU with 8GB VRAM to run this.\n" });
+  assert.equal(gpu.level, "no");
+  assert.equal(gpu.reasons.find(r => /graphics card/.test(r.text)).quote, "You need an NVIDIA GPU with 8GB VRAM to run this.");
+  assert.equal(verdict({ "requirements.txt": "flask\n", "README.md": "Requires at least 4 GB of RAM." }).level, "no");
+  assert.equal(verdict({ "README.md": "## Install\n```\ndocker compose up -d\n```" }).level, "no");
+  assert.equal(verdict({ "requirements.txt": "selenium\nrequests\n", "README.md": "x" }).level, "no");
+  assert.equal(verdict({ "package.json": JSON.stringify({ name: "a", bin: "a.js", engines: { node: ">=26" } }), "README.md": "x" }).level, "no");
+  assert.equal(verdict({ "Package.swift": "// swift-tools-version", "README.md": "An iOS app" }).level, "no");
+  assert.equal(verdict({ "README.md": "# Runner\nGet up and running with large language models locally.\n" }).level, "no");
+});
+
+test("compatibility: no false alarms from incidental wording", () => {
+  // bat: a remark about Windows, not a platform restriction
+  const bat = verdict({ "Cargo.toml": "[package]", "README.md": "Windows only includes a very limited pager in the form of more." }, { apk: { found: true, match: "repository", name: "bat", version: "1", commands: ["bat"] } });
+  assert.equal(bat.level, "good");
+  // yt-dlp: reading cookies from a browser is not driving one
+  const ytdlp = verdict({ "pyproject.toml": '[project]\nname = "yt-dlp"\n', "README.md": "Cookies can be automatically extracted from all major web browsers." }, { pypi: { name: "yt-dlp", requires: [], matchesRepo: true } });
+  assert.equal(ytdlp.level, "good");
+  // glances: optional Windows dependency and a screenshot file name
+  const glances = verdict({ "pyproject.toml": '[project]\nname = "glances"\n', "README.md": "- windows-curses [Windows only]\n![shot](docs/screenshot-webui-browser.png)\n" }, { pypi: { name: "glances", requires: [], matchesRepo: true } });
+  assert.equal(glances.level, "good");
+  // third-party projects listed under "Community" don't describe this one
+  const listed = verdict({ "pyproject.toml": '[project]\nname = "x"\n', "README.md": "# X\nA small tool.\n## Community\n- Thing - self-hosted AI desktop app for Mac and Windows\n" }, { pypi: { name: "x", requires: [], matchesRepo: true } });
+  assert.equal(listed.level, "good");
+  assert.doesNotMatch(readmeProse("Use it\n## Integrations\nself-hosted things"), /self-hosted/);
+});
+
+test("compatibility: skills and paid services are explained, not hidden", () => {
+  const skills = verdict({ "SKILL.md": "---\nname: x\n---" });
+  assert.equal(skills.level, "maybe");
+  assert.match(skills.reasons[0].text, /Anthropic API key, paid separately/);
+  assert.equal(verdict({ "SKILL.md": "---\nname: x\n---" }, {}, { hasAiKey: true }).level, "good");
+  const paid = verdict({ "pyproject.toml": '[project]\nname = "x"\n', "README.md": "export OPENAI_API_KEY=sk-...\nexport TELEGRAM_BOT_TOKEN=..." }, { pypi: { name: "x", requires: [], matchesRepo: true } });
+  assert.equal(paid.level, "maybe");
+  assert.ok(paid.reasons.some(r => /OpenAI \(OPENAI_API_KEY\).*usually paid/.test(r.text)));
+  assert.ok(paid.reasons.some(r => r.level === "info" && /Telegram/.test(r.text)));
+  // n8n-style repo: developer skills in a hidden folder don't make it a skills repo
+  const app = buildPlan(facts({ "package.json": JSON.stringify({ name: "app", private: true, scripts: { start: "node ." } }), "README.md": "x" }, { tree: [".claude/skills/dev/SKILL.md", "package.json"] }));
+  assert.notEqual(app.kind, "skill");
 });

@@ -13,6 +13,7 @@ own icon, like any other app.
 | `web/` | The app. Runs a 32-bit Alpine Linux in an x86 emulator (v86, WebAssembly) on the phone. |
 | `web/vm/` | The Linux system image, split into 1 MB pieces that load on demand (74 MB in total). |
 | `server/relay.mjs` | Serves the app and relays the Linux VM's network traffic. A browser can't open raw internet connections, so this small server is required. |
+| `web/js/compat.js` | The "will it work on my phone?" check shown before installing. |
 | `web/js/recipes.js`, `workspace.js`, `assistant.js` | The per-app screens: recipes, the automatic options screen, file sharing, and Ask AI. |
 | Google Drive | Backup only. The VM's disk is saved on the phone and, if you connect Drive, copied to a `Dock` folder there. Drive stores files; nothing runs on it. |
 
@@ -20,6 +21,21 @@ Installing from a link: Dock fetches the repo's README and manifest files, picks
 fastest working route (PyPI release, npm release, prebuilt Alpine package, agent-skills
 folder, or a source build), shows the steps, and runs them with live output. If the
 first route fails it falls back to building from source.
+
+## "Will it work on my phone?"
+
+Before anything is installed, Dock reads the repository's README and its setup files and
+shows a verdict: **Should work**, **Might work** or **Won't work on a phone**, with the
+reasons and the README lines that led to them. No AI is involved (`web/js/compat.js`).
+
+It looks for: a ready-made Alpine Linux build of the project (looked up by the server in
+Alpine's package index), releases on PyPI or npm, and things a phone's emulated Linux
+can't provide — a GPU, gigabytes of memory, Docker, a real web browser, desktop or phone
+app projects, runtimes with no 32-bit build (Deno, Bun, .NET), local AI models, Rust or
+C code that would need compiling, and paid API keys the tool depends on.
+
+On 38 well-known repositories the verdicts matched what actually works, but it is a set of
+rules reading prose, so it can still be wrong; "Install anyway" is always available.
 
 ## Using an installed app
 

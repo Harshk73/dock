@@ -11,6 +11,11 @@
 //   GET  /r/TOKEN/info        -> {"dock": 1, ...}
 //   POST /r/TOKEN/dns-query   -> DNS-over-HTTPS wire format
 //   WS   /r/TOKEN/wisp/       -> WISP v1 (+ PAUSE/RESUME extension packets 0x11/0x12)
+//   GET  /r/TOKEN/apk?repo=owner/name&names=a,b
+//                             -> the Alpine package (if any) built from that GitHub
+//                                repository or carrying one of those names, with the
+//                                commands it installs. Browsers can't read Alpine's index
+//                                themselves (no CORS), so the relay does it.
 // Everything else is served from ../web as static files.
 
 import http from "node:http";
@@ -19,6 +24,7 @@ import dns from "node:dns/promises";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import zlib from "node:zlib";
 import { WebSocketServer } from "ws";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -107,6 +113,103 @@ function dnsReply(query, q, { rcode = 0, address = null }) {
   return Buffer.concat([head, answer]);
 }
 
+const ALPINE = "https://dl-cdn.alpinelinux.org/alpine";
+
+function parseApkIndex(text, repository) {
+  const packages = [];
+  for (const block of text.split("\n\n")) {
+    const pkg = { repository, commands: [] };
+    for (const line of block.split("\n")) {
+      const key = line.slice(0, 2);
+      const value = line.slice(2);
+      if (key === "P:") pkg.name = value;
+      else if (key === "V:") pkg.version = value;
+      else if (key === "T:") pkg.description = value;
+      else if (key === "U:") pkg.url = value;
+      else if (key === "o:") pkg.origin = value;
+      else if (key === "p:") {
+        for (const item of value.split(" ")) if (item.startsWith("cmd:")) pkg.commands.push(item.slice(4).split("=")[0]);
+      }
+    }
+    if (pkg.name) packages.push(pkg);
+  }
+  return packages;
+}
+
+function githubKey(url) {
+  const m = String(url || "").toLowerCase().match(/^https?:\/\/(?:www\.)?github\.com\/([^/]+)\/([^/#?]+?)(?:\.git)?\/?(?:[#?].*)?$/);
+  if (m) return `${m[1]}/${m[2]}`;
+  const pages = String(url || "").toLowerCase().match(/^https?:\/\/([^./]+)\.github\.io\/([^/#?]+)\/?/);
+  return pages ? `${pages[1]}/${pages[2]}` : null;
+}
+
+/** Alpine's package index for the architecture and release the VM uses, cached. */
+function createApkLookup({ branch, arch, log, fetchImpl = globalThis.fetch }) {
+  let cache = null;
+  let loading = null;
+  async function load() {
+    if (cache && Date.now() - cache.at < 12 * 3600e3) return cache;
+    if (!loading) {
+      loading = (async () => {
+        const packages = [];
+        for (const repository of ["main", "community"]) {
+          const res = await fetchImpl(`${ALPINE}/${branch}/${repository}/${arch}/APKINDEX.tar.gz`);
+          if (!res.ok) throw new Error(`Alpine index: HTTP ${res.status}`);
+          const tar = zlib.gunzipSync(Buffer.from(await res.arrayBuffer()));
+          // A tar of a few small files; APKINDEX is the one we want.
+          for (let off = 0; off + 512 <= tar.length;) {
+            const name = tar.subarray(off, off + 100).toString().replace(/\0.*$/s, "");
+            const size = parseInt(tar.subarray(off + 124, off + 136).toString().replace(/\0.*$/s, "").trim() || "0", 8);
+            if (!name) break;
+            if (name === "APKINDEX") packages.push(...parseApkIndex(tar.subarray(off + 512, off + 512 + size).toString(), repository));
+            off += 512 + Math.ceil(size / 512) * 512;
+          }
+        }
+        const byGithub = new Map();
+        const byName = new Map();
+        for (const pkg of packages) {
+          byName.set(pkg.name, pkg);
+          const key = githubKey(pkg.url);
+          if (key) (byGithub.get(key) || byGithub.set(key, []).get(key)).push(pkg);
+        }
+        cache = { at: Date.now(), byGithub, byName, count: packages.length };
+        log(`alpine index loaded: ${packages.length} packages`);
+        return cache;
+      })().finally(() => { loading = null; });
+    }
+    return loading;
+  }
+
+  // Among the packages built from one source, the one users want is the one that
+  // installs commands and isn't documentation, headers or a library split.
+  const pick = list => {
+    const useful = list.filter(p => !/-(doc|dev|dbg|static|lang|openrc|bash-completion|zsh-completion|fish-completion|pyc)$/.test(p.name));
+    return useful.find(p => p.commands.length && p.name === p.origin) || useful.find(p => p.commands.length) || useful.find(p => p.name === p.origin) || useful[0] || null;
+  };
+
+  return async function lookup(repo, names) {
+    const index = await load();
+    let pkg = null;
+    let match = null;
+    if (repo && index.byGithub.has(repo.toLowerCase())) {
+      pkg = pick(index.byGithub.get(repo.toLowerCase()));
+      match = "repository";
+    }
+    for (const name of names) {
+      if (pkg) break;
+      const hit = index.byName.get(name.toLowerCase());
+      // Same name, but Alpine builds it from a different GitHub project: not this one.
+      const other = hit && githubKey(hit.url);
+      if (hit && !(other && repo && other !== repo.toLowerCase())) {
+        pkg = pick([...index.byName.values()].filter(p => p.origin === (hit.origin || hit.name))) || hit;
+        match = "name";
+      }
+    }
+    if (!pkg) return { found: false, packages: index.count };
+    return { found: true, match, name: pkg.name, version: pkg.version, description: pkg.description, url: pkg.url, commands: pkg.commands, repository: pkg.repository };
+  };
+}
+
 function parseProxy(env) {
   const raw = env.DOCK_UPSTREAM_PROXY ?? env.HTTPS_PROXY ?? env.https_proxy ?? "";
   if (!raw) return null;
@@ -131,6 +234,9 @@ export function createRelay(options = {}) {
   const proxy = options.proxy !== undefined ? options.proxy : parseProxy(env);
   const log = options.log ?? ((...a) => console.log(new Date().toISOString(), ...a));
   const names = new NameTable();
+  const apkLookup = options.apkLookup || createApkLookup({
+    branch: env.DOCK_ALPINE_BRANCH || "v3.24", arch: "x86", log,
+  });
   const prefix = `/r/${token}`;
 
   async function resolveTarget(address) {
@@ -228,6 +334,20 @@ export function createRelay(options = {}) {
     if (url.pathname === `${prefix}/info`) {
       res.setHeader("content-type", "application/json");
       return res.end(JSON.stringify({ dock: 1, flowControl: true, streamBuffer: STREAM_BUFFER }));
+    }
+    if (url.pathname === `${prefix}/apk`) {
+      res.setHeader("content-type", "application/json");
+      const repo = (url.searchParams.get("repo") || "").slice(0, 200);
+      const wanted = (url.searchParams.get("names") || "").split(",").map(n => n.trim()).filter(n => /^[a-z0-9][a-z0-9+._-]{0,60}$/i.test(n)).slice(0, 8);
+      apkLookup(/^[\w.-]+\/[\w.-]+$/.test(repo) ? repo : "", wanted).then(result => {
+        res.setHeader("cache-control", "public, max-age=3600");
+        res.end(JSON.stringify(result));
+      }, err => {
+        log("apk lookup failed", err.message);
+        res.statusCode = 502;
+        res.end(JSON.stringify({ error: "Alpine package index unavailable" }));
+      });
+      return;
     }
     if (url.pathname === `${prefix}/dns-query` && req.method === "POST") {
       return handleDns(req, res).catch(err => { log("dns error", err.message); res.statusCode = 500; res.end(); });

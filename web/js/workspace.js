@@ -426,8 +426,9 @@ export function openWorkspace(ctx, app) {
     const use = state.use;
     const bins = app.bins && app.bins.length ? app.bins : app.launch && !app.launchLabel ? [app.launch] : [];
     if (!bins.length) {
-      put(body, h("p", { class: "ws-lead" }, "This project didn't add a command Dock can run for you. Ask AI can work with its files, or open it in the Terminal."),
-        h("button", { class: "btn primary", type: "button", onclick: () => show("ai") }, "Ask AI"));
+      put(body, h("p", { class: "ws-lead" }, "This project didn't add a command Dock can make buttons for. You can still look through its files and run it yourself in the Terminal."),
+        h("button", { class: "btn primary", type: "button", style: "width:100%", onclick: () => { close(); ctx.openTerminal(app); } }, "Open in Terminal"),
+        ctx.settings.anthropicKey ? h("button", { class: "btn", type: "button", style: "width:100%;margin-top:10px", onclick: () => show("ai") }, "Ask AI") : null);
       return;
     }
     use.bin = use.bin || (bins.includes(app.launch) ? app.launch : bins[0]);
@@ -511,8 +512,10 @@ export function openWorkspace(ctx, app) {
   async function renderSkills() {
     const list = h("div", { class: "rows" }, h("div", { class: "row" }, h("span", { class: "muted" }, "Loading…")));
     put(body, 
-      h("p", { class: "ws-lead" }, "Skills are instructions an AI follows to do a kind of task. Add your files, then tell Ask AI what you want and it uses these."),
-      h("button", { class: "btn primary", type: "button", style: "width:100%;margin-bottom:18px", onclick: () => show("ai") }, "Ask AI to use these skills"),
+      h("p", { class: "ws-lead" }, ctx.settings.anthropicKey
+        ? "Skills are instructions an AI follows to do a kind of task. Add your files, then tell Ask AI what you want and it uses these."
+        : "Skills are instructions an AI follows to do a kind of task. On Dock they only do something through Ask AI, which needs an Anthropic API key (paid separately; Claude Pro doesn't cover it). You can still read each skill below."),
+      ctx.settings.anthropicKey ? h("button", { class: "btn primary", type: "button", style: "width:100%;margin-bottom:18px", onclick: () => show("ai") }, "Ask AI to use these skills") : null,
       h("div", { class: "group" }, h("h3", {}, "Installed skills"), list));
     const skills = await loadSkills();
     if (!alive || state.pane !== "use") return;
@@ -549,7 +552,8 @@ export function openWorkspace(ctx, app) {
       const input = h("input", { type: "password", placeholder: "sk-ant-…", autocapitalize: "off", autocorrect: "off", spellcheck: "false" });
       body.classList.remove("chat");
       put(body, 
-        h("p", { class: "ws-lead" }, `Describe what you want in plain words and an AI runs ${app.name} for you: it types the commands, reads the results and hands you the files.`),
+        h("p", { class: "ws-lead" }, `Optional. Describe what you want in plain words and an AI runs ${app.name} for you: it types the commands, reads the results and hands you the files.`),
+        notice("info", "This needs an Anthropic API key, which is billed separately from a Claude Pro or Max subscription. Everything else in Dock works without it."),
         h("div", { class: "rows", style: "margin-bottom:12px" }, h("label", { class: "row" }, h("div", { class: "row-main" }, h("span", {}, "Anthropic API key"), h("span", { class: "muted" }, "Stored on this phone only. You pay Anthropic for what the AI uses."), input))),
         h("button", { class: "btn primary", type: "button", style: "width:100%", onclick: async () => {
           if (!input.value.trim()) return toast("Paste your API key first.");

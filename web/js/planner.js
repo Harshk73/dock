@@ -180,6 +180,9 @@ function planPython(facts, plan, cmds) {
   plan.name = declared || facts.repo;
   if (project.description && !plan.description) plan.description = project.description;
 
+  plan.signals.pythonDeps = [...deps];
+  const requires = String(project["requires-python"] || "").match(/>=?\s*(\d+)\.(\d+)/);
+  if (requires) plan.signals.requiresPython = [Number(requires[1]), Number(requires[2])];
   const heavy = [...deps].filter(d => HEAVY_PYTHON.includes(d));
   const gui = [...deps].filter(d => GUI_PYTHON.includes(d));
   if (heavy.length) plan.warnings.push({ level: "block", text: `Needs ${heavy.join(", ")}: large machine-learning libraries that have no build for this environment. It is very unlikely to install.` });
@@ -234,7 +237,7 @@ function planPython(facts, plan, cmds) {
     plan.badges.push(web[0].toUpperCase() + web.slice(1));
     if (NEEDS_WEBSOCKET.includes(web)) plan.warnings.push({ level: "warn", text: `${web} pages rely on WebSockets, which Dock's preview can't carry yet, so the page may load but stay blank.` });
   }
-  if (deps.has("mcp") || deps.has("fastmcp") || /\bmcp\b/i.test(plan.name)) {
+  if (/\bmcp\b/i.test(`${plan.name} ${facts.repo}`) || ((deps.has("mcp") || deps.has("fastmcp")) && /\bmcp server\b/i.test(readme(facts).slice(0, 800)))) {
     plan.badges.push("MCP server");
     if (plan.kind === "cli") plan.kind = "mcp";
   }
@@ -261,6 +264,9 @@ function planNode(facts, plan, cmds) {
   const bins = typeof pkg.bin === "string" ? [String(pkg.name || facts.repo).replace(/^@[^/]+\//, "")]
     : pkg.bin ? Object.keys(pkg.bin) : [];
   plan.runtime = "node";
+  plan.signals.nodeDeps = Object.keys(deps);
+  const engine = String((pkg.engines && pkg.engines.node) || "").match(/(?:>=?|\^|~)?\s*(\d+)/);
+  if (engine) plan.signals.nodeEngine = Number(engine[1]);
   plan.name = String(pkg.name || facts.repo).replace(/^@[^/]+\//, "");
   if (pkg.description && !plan.description) plan.description = pkg.description;
   plan.bins = bins;
@@ -303,7 +309,7 @@ function planNode(facts, plan, cmds) {
     if (plan.launch) plan.launch = plan.launch.replace("&& ", `&& HOST=0.0.0.0 PORT=${plan.port} `);
     if (NEEDS_WEBSOCKET.includes(web)) plan.warnings.push({ level: "warn", text: `${web} dev servers use WebSockets for live reload, which Dock's preview can't carry yet. Pages still load.` });
   }
-  if (deps["@modelcontextprotocol/sdk"] || /\bmcp\b/i.test(plan.name)) {
+  if (/\bmcp\b/i.test(`${plan.name} ${facts.repo}`) || (deps["@modelcontextprotocol/sdk"] && /\bmcp server\b/i.test(readme(facts).slice(0, 800)))) {
     plan.badges.push("MCP server");
     if (plan.kind === "cli") plan.kind = "mcp";
   }
@@ -324,7 +330,24 @@ function planCompiled(facts, plan, language) {
   plan.fallback = { method: "Compile from source", steps: [cloneStep(facts), build] };
   // The package name is not always the command name (ripgrep installs "rg").
   plan.discover = `apk info -qL ${q(name)} 2>/dev/null | grep -E '^usr/(local/)?s?bin/' | xargs -rn1 basename`;
-  plan.warnings.push({ level: "warn", text: `${language === "go" ? "Go" : "Rust"} projects must be compiled. Dock first looks for a ready-made Alpine package; if there isn't one, compiling on the phone can take a very long time.` });
+}
+
+// The project's ready-made Alpine package (see the relay's /apk lookup): exact name and
+// the commands it installs, so nothing is guessed.
+function planAlpine(facts, plan) {
+  const pkg = facts.apk;
+  plan.name = facts.repo;
+  plan.method = "Alpine package";
+  plan.alpine = { name: pkg.name, version: pkg.version };
+  plan.steps = [{ title: `Install the ready-made ${pkg.name} package`, cmd: `apk add --no-cache ${q(pkg.name)}` }];
+  plan.fallback = null;
+  plan.uninstall = `apk del ${q(pkg.name)} 2>/dev/null; true`;
+  plan.bins = pkg.commands || [];
+  const norm = s => String(s).toLowerCase().replace(/[^a-z0-9]/g, "");
+  plan.launch = plan.bins.find(b => norm(b) === norm(facts.repo)) || plan.bins.find(b => norm(facts.repo).includes(norm(b))) || plan.bins[0] || null;
+  plan.launchLabel = null;
+  plan.discover = `apk info -qL ${q(pkg.name)} 2>/dev/null | grep -E '^usr/(local/)?s?bin/' | xargs -rn1 basename`;
+  if (!plan.description && pkg.description) plan.description = pkg.description;
 }
 
 // C and C++ projects (FFmpeg, ImageMagick, jq...) can't sensibly be compiled inside the
@@ -337,7 +360,6 @@ function planNative(facts, plan) {
   plan.steps = [{ title: `Install the prebuilt ${name} package`, cmd: `apk add --no-cache ${q(name)}` }];
   plan.uninstall = `apk del ${q(name)} 2>/dev/null; true`;
   plan.discover = `apk info -qL ${q(name)} 2>/dev/null | grep -E '^usr/(local/)?s?bin/' | xargs -rn1 basename`;
-  plan.warnings.push({ level: "warn", text: "This project is written in C or C++. Dock installs the ready-made Alpine Linux build of it; if Alpine doesn't carry one, it can't be installed here." });
 }
 
 function planSkill(facts, plan) {
@@ -387,16 +409,20 @@ export function buildPlan(facts) {
     discover: null, // optional command that prints the names of the commands it installed
     uninstall: "true",
     warnings: [],
+    alpine: null, // {name, version} when installed from Alpine's ready-made package
+    signals: {}, // facts for the compatibility check (compat.js)
   };
 
   const tree = facts.tree || [];
+  // Skills inside hidden folders (.claude/, .agents/) are the project's own developer
+  // tooling, not what it offers.
   const hasSkills = !!files["SKILL.md"] || !!files[".claude-plugin/plugin.json"] || !!files[".claude-plugin/marketplace.json"]
-    || tree.some(p => /(^|\/)SKILL\.md$/.test(p));
+    || tree.some(p => /(^|\/)SKILL\.md$/.test(p) && !/(^|\/)\./.test(p));
   const nodeBin = (() => { try { return !!JSON.parse(files["package.json"] || "{}").bin; } catch { return false; } })();
   const pythonPackaged = !!(files["pyproject.toml"] || files["setup.py"] || files["setup.cfg"]);
   const looksLikeSkillRepo = /\bskills?\b/i.test(facts.repo) || /agent skills?|claude (code )?skills?|SKILL\.md/i.test(text.slice(0, 4000));
 
-  if (hasSkills && !nodeBin && !pythonPackaged) {
+  if (hasSkills && !nodeBin && !pythonPackaged && (!files["package.json"] || looksLikeSkillRepo)) {
     planSkill(facts, plan);
   } else if (!files["package.json"] && !pythonPackaged && !files["requirements.txt"] && !files["go.mod"] && !files["Cargo.toml"] && looksLikeSkillRepo && !facts.tree) {
     // No file listing (GitHub API unavailable) but everything says "skills".
@@ -415,6 +441,24 @@ export function buildPlan(facts) {
     planFromReadme(facts, plan, cmds);
   }
 
+  // Alpine builds this very project: for compiled programs (and anything Dock was only
+  // going to guess at) that beats every other route. facts.apk is undefined when the
+  // lookup wasn't possible, and then the guesses above stand.
+  const weakRoute = ["go", "rust", "native", "unknown"].includes(plan.runtime) || plan.kind === "source";
+  const blocked = plan.warnings.some(w => w.level === "block");
+  if (facts.apk && facts.apk.found && (weakRoute || (blocked && facts.apk.match === "repository"))) {
+    if (plan.runtime === "unknown") plan.runtime = "native";
+    plan.kind = plan.kind === "source" ? "cli" : plan.kind;
+    plan.warnings = plan.warnings.filter(w => w.level !== "block" || !/Docker|compile|install instructions/i.test(w.text));
+    planAlpine(facts, plan);
+  } else if (facts.apk && !facts.apk.found && ["go", "rust", "native"].includes(plan.runtime)) {
+    // The guessed package doesn't exist: build from source is the only route left.
+    plan.method = "Compile from source";
+    if (plan.fallback) { plan.steps = plan.fallback.steps; plan.fallback = null; }
+    else plan.steps = [cloneStep(facts)];
+    plan.discover = null;
+  }
+
   if (!plan.description) {
     const line = text.split("\n").map(l => l.trim()).find(l => l && !/^[#<>!\[=|-]/.test(l) && l.length > 20);
     if (line) plan.description = line.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1").replace(/[*_`]/g, "").slice(0, 160);
@@ -426,9 +470,30 @@ export function buildPlan(facts) {
   return plan;
 }
 
+// Tools made of shell scripts (neofetch, git-extras...) install with "make install",
+// which only copies files.
+function planShell(facts, plan) {
+  plan.runtime = "shell";
+  plan.name = facts.repo;
+  plan.method = "make install";
+  plan.steps = [
+    cloneStep(facts),
+    { title: "Install its scripts", cmd: `apk add --no-cache make bash >/dev/null && cd "$SRC" && make install PREFIX=/dock DESTDIR=` },
+  ];
+  plan.uninstall = `cd "$SRC" 2>/dev/null && make uninstall PREFIX=/dock DESTDIR= 2>/dev/null; true`;
+  plan.launch = facts.repo.toLowerCase();
+}
+
 function planFromReadme(facts, plan, cmds) {
   const files = facts.files;
   const name = facts.repo.toLowerCase();
+  const language = String((facts.meta && facts.meta.language) || "").toLowerCase();
+  const makefile = files["Makefile"] || "";
+  const compiled = /^(c|c\+\+|objective-c|assembly|rust|go)$/.test(language) || /\b(?:gcc|clang|cmake|autoconf|\.\/configure)\b/i.test(readme(facts)) || /\$\((?:CC|CXX)\)|\b(?:gcc|g\+\+|clang)\b|\.o\b/.test(makefile);
+  if (makefile && !compiled && (/\bmake install\b/.test(readme(facts)) || /^install\s*:/m.test(makefile))) {
+    planShell(facts, plan);
+    return;
+  }
   const looksNative = !!files["Makefile"] || new RegExp(`\\b(?:apt(?:-get)?|brew|dnf|pacman|apk|choco|scoop) (?:install|add|-S)\\b[^\\n]*\\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(readme(facts));
   if (looksNative && /^[a-z0-9][a-z0-9+._-]*$/.test(name)) {
     // Programs installed with a system package manager are usually in Alpine too.

@@ -6,6 +6,7 @@ import { kv, apps as appStore, overlay, requestPersistence } from "./store.js";
 import { createVm } from "./vm.js";
 import { parseRepoUrl, fetchRepoFacts } from "./github.js";
 import { buildPlan } from "./planner.js";
+import { assessCompatibility } from "./compat.js";
 import { runInstall, runUninstall, writeAppRecord, readAppRecords, InstallCancelled } from "./installer.js";
 import { TerminalManager, createScreen } from "./terminal.js";
 import { Drive } from "./drive.js";
@@ -18,9 +19,9 @@ const $ = id => document.getElementById(id);
 const put = (el, ...kids) => { for (const kid of kids.flat(Infinity)) if (kid !== null && kid !== undefined && kid !== false) el.append(kid); };
 const MIB = 1 << 20;
 const SUGGESTIONS = [
-  ["yt-dlp", "yt-dlp/yt-dlp"], ["cowsay", "piuccio/cowsay"], ["ripgrep", "BurntSushi/ripgrep"], ["Agent skills", "anthropics/skills"],
+  ["yt-dlp", "yt-dlp/yt-dlp"], ["FFmpeg", "FFmpeg/FFmpeg"], ["ripgrep", "BurntSushi/ripgrep"], ["cowsay", "piuccio/cowsay"],
 ];
-const RUNTIME_LABEL = { python: "Python", node: "Node.js", go: "Go", rust: "Rust", native: "C / C++", skill: "Skills", unknown: "Source" };
+const RUNTIME_LABEL = { python: "Python", node: "Node.js", go: "Go", rust: "Rust", native: "C / C++", shell: "Shell scripts", skill: "Skills", unknown: "Source" };
 const KIND_LABEL = { cli: "Command-line tool", web: "Web app", skill: "Agent skills", mcp: "MCP server", source: "Source only" };
 
 // iPadOS reports itself as a Mac; touch support gives it away.
@@ -313,9 +314,10 @@ async function updateStorage() {
 // ------------------------------------------------------------------ add from GitHub
 
 function planTags(plan) {
-  const tags = [h("span", { class: "tag accent" }, KIND_LABEL[plan.kind] || plan.kind), h("span", { class: "tag" }, RUNTIME_LABEL[plan.runtime] || plan.runtime)];
-  if (plan.method) tags.push(h("span", { class: "tag" }, plan.method));
-  for (const badge of plan.badges) tags.push(h("span", { class: "tag" }, badge));
+  const labels = [KIND_LABEL[plan.kind] || plan.kind, RUNTIME_LABEL[plan.runtime] || plan.runtime, plan.method, ...plan.badges].filter(Boolean);
+  const seen = new Set();
+  const unique = labels.filter(l => { const k = l.toLowerCase().replace(/s$/, ""); return !seen.has(k) && seen.add(k); });
+  const tags = unique.map((label, i) => h("span", { class: i ? "tag" : "tag accent" }, label));
   if (plan.stars) tags.push(h("span", { class: "tag" }, `★ ${plan.stars >= 1000 ? (plan.stars / 1000).toFixed(plan.stars >= 10000 ? 0 : 1) + "k" : plan.stars}`));
   return h("div", { class: "tags" }, tags);
 }
@@ -344,8 +346,11 @@ async function analyze(input) {
   );
   put(sheet.foot, h("button", { class: "btn", type: "button", onclick: () => sheet.close() }, "Cancel"));
   let plan;
+  let verdict;
   try {
-    plan = buildPlan(await fetchRepoFacts(target, { token: state.settings.githubToken }));
+    const facts = await fetchRepoFacts(target, { token: state.settings.githubToken, relayBase: relayBase() });
+    plan = buildPlan(facts);
+    verdict = assessCompatibility(facts, plan, { hasAiKey: !!state.settings.anthropicKey });
   } catch (err) {
     sheet.body.textContent = "";
     put(sheet.body, h("h2", { style: "margin:6px 0 10px" }, "Couldn't read that repository"),
@@ -353,12 +358,28 @@ async function analyze(input) {
     return;
   }
   $("add-input").value = "";
-  renderPlan(sheet, plan);
+  renderPlan(sheet, plan, verdict);
 }
 
-function renderPlan(sheet, plan) {
+const VERDICT_ICON = {
+  good: '<svg viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  maybe: '<svg viewBox="0 0 24 24"><path d="M12 7v6.5M12 17.2v.3" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>',
+  no: '<svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7 7 17" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>',
+};
+
+/** "Will this work on my phone?" card at the top of the install sheet. */
+function verdictCard(verdict) {
+  const list = h("ul", { class: "verdict-reasons" }, verdict.reasons.map(r =>
+    h("li", { class: `r-${r.level}` }, h("span", {}, r.text), r.quote ? h("q", {}, r.quote) : null)));
+  return h("div", { class: `verdict v-${verdict.level}` },
+    h("div", { class: "verdict-head" }, h("span", { class: "verdict-icon", html: VERDICT_ICON[verdict.level] }),
+      h("div", {}, h("strong", {}, verdict.headline), h("span", {}, verdict.detail))),
+    verdict.reasons.length ? list : null);
+}
+
+function renderPlan(sheet, plan, verdict) {
   const existing = state.apps.find(a => a.id === plan.id && a.status === "installed");
-  const blocked = plan.warnings.some(w => w.level === "block");
+  const level = verdict ? verdict.level : plan.warnings.some(w => w.level === "block") ? "no" : "good";
   sheet.body.textContent = "";
   sheet.foot.textContent = "";
   const steps = stepList(plan.steps);
@@ -369,18 +390,24 @@ function renderPlan(sheet, plan) {
   put(sheet.body, 
     h("div", { class: "sheet-title" }, appIcon({ ...plan }), h("div", {}, h("h2", {}, plan.name), h("p", { class: "muted" }, `${plan.owner}/${plan.repo}`))),
     plan.description ? h("p", { class: "desc" }, plan.description) : null,
+    verdict ? verdictCard(verdict) : plan.warnings.map(w => notice(w.level, w.text)),
     planTags(plan),
-    plan.warnings.map(w => notice(w.level, w.text)),
     state.vm.status === "booting" ? notice("info", "Linux is still starting. The install begins as soon as it's ready.") : null,
     h("div", { class: "section-head", style: "margin:14px 2px 10px" }, h("h3", { style: "font-size:16px" }, "What Dock will do"), toggle),
     steps,
     plan.fallback ? h("p", { class: "muted small", style: "margin:-4px 4px 10px" }, `If that fails, Dock tries: ${plan.fallback.method.toLowerCase()}.`) : null,
   );
-  put(sheet.foot, 
-    h("button", { class: "btn", type: "button", onclick: () => sheet.close() }, "Cancel"),
-    h("button", { class: "btn primary", type: "button", id: "install-go", onclick: () => { sheet.close(); startInstall(plan); } },
-      existing ? "Reinstall" : blocked ? "Try anyway" : "Install"),
-  );
+  const install = () => { sheet.close(); startInstall(plan); };
+  if (level === "no" && !existing) {
+    // Don't invite a doomed install, but don't forbid trying either.
+    put(sheet.body, h("button", { class: "link try-anyway", type: "button", id: "install-go", onclick: install }, "Install anyway"));
+    put(sheet.foot, h("button", { class: "btn primary", type: "button", onclick: () => sheet.close() }, "OK"));
+  } else {
+    put(sheet.foot,
+      h("button", { class: "btn", type: "button", onclick: () => sheet.close() }, "Cancel"),
+      h("button", { class: "btn primary", type: "button", id: "install-go", onclick: install },
+        existing ? "Reinstall" : level === "maybe" ? "Try installing" : "Install"));
+  }
 }
 
 function pickLaunch(bins, name) {

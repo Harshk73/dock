@@ -10,6 +10,8 @@ const PROBE_FILES = [
   "Cargo.toml", "go.mod", "Makefile", "configure", "CMakeLists.txt", "meson.build", "install.sh", "Dockerfile", "docker-compose.yml",
   "SKILL.md", ".claude-plugin/plugin.json", ".claude-plugin/marketplace.json",
   "main.py", "app.py", "manage.py",
+  // Only needed to recognise projects that can't run on Dock (see compat.js).
+  "Package.swift", "pubspec.yaml", "build.gradle", "build.gradle.kts", "pom.xml", "deno.json", "pnpm-workspace.yaml",
 ];
 
 /** Accepts the forms people actually paste; returns null if it isn't a GitHub repo. */
@@ -94,6 +96,7 @@ export async function fetchRepoFacts(target, options = {}) {
     tree: tree && Array.isArray(tree.tree) ? tree.tree.map(t => t.path) : null,
     npm: null,
     pypi: null,
+    apk: undefined, // Alpine package lookup result; undefined when it couldn't be done
   };
 
   // Is the project published on a package registry under its own name? Installing the
@@ -122,6 +125,17 @@ export async function fetchRepoFacts(target, options = {}) {
           matchesRepo: mentionsRepo([info.info.project_urls, info.info.home_page], owner, repo),
         };
       }
+    }));
+  }
+  // Does Alpine Linux carry a ready-made build of this project? The relay reads Alpine's
+  // package index for us (browsers can't, for lack of CORS).
+  if (options.relayBase) {
+    const names = new Set([repo.toLowerCase()]);
+    try { const n = JSON.parse(files["package.json"] || "{}").name; if (n) names.add(String(n).replace(/^@[^/]+\//, "").toLowerCase()); } catch { /* ignore */ }
+    const py = pythonProjectName(files);
+    if (py) names.add(py.toLowerCase());
+    lookups.push(fetchJson(`${options.relayBase}/apk?repo=${encodeURIComponent(`${owner}/${repo}`)}&names=${encodeURIComponent([...names].join(","))}`).then(info => {
+      if (info && typeof info.found === "boolean") facts.apk = info;
     }));
   }
   await Promise.all(lookups);

@@ -421,3 +421,26 @@ h2 { font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
 .term-empty { align-content: center; gap: 12px; }
 #boot-log { margin: 0; max-width: 100%; max-height: 45vh; overflow: hidden; text-align: left; font: 10.5px/1.4 var(--mono); color: #6f7487; white-space: pre-wrap; word-break: break-word; }
 #boot-log:empty { display: none; }
+
+/* ---- "will it work on my phone?" verdict ---- */
+.verdict { border-radius: 18px; padding: 14px; margin-bottom: 14px; border: 1px solid var(--line); background: var(--card); }
+.verdict-head { display: flex; gap: 12px; align-items: flex-start; }
+.verdict-head > div { display: flex; flex-direction: column; gap: 2px; }
+.verdict-head strong { font-size: 17px; }
+.verdict-head > div > span { font-size: 14px; color: #c9ccd8; }
+.verdict-icon { width: 30px; height: 30px; border-radius: 50%; flex: none; display: grid; place-items: center; }
+.verdict-icon svg { width: 18px; height: 18px; }
+.v-good { background: rgba(61, 220, 151, 0.09); border-color: rgba(61, 220, 151, 0.35); }
+.v-good .verdict-icon { background: var(--good); color: #06281a; }
+.v-maybe { background: rgba(255, 184, 77, 0.09); border-color: rgba(255, 184, 77, 0.35); }
+.v-maybe .verdict-icon { background: var(--warn); color: #3a2400; }
+.v-no { background: rgba(255, 107, 122, 0.09); border-color: rgba(255, 107, 122, 0.4); }
+.v-no .verdict-icon { background: var(--bad); color: #3a0a10; }
+.verdict-reasons { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 9px; font-size: 14px; }
+.verdict-reasons li { position: relative; padding-left: 18px; color: #d6d8e2; }
+.verdict-reasons li::before { content: ""; position: absolute; left: 2px; top: 7px; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.verdict-reasons .r-block::before { background: var(--bad); }
+.verdict-reasons .r-warn::before { background: var(--warn); }
+.verdict-reasons .r-good::before { background: var(--good); }
+.verdict-reasons q { display: block; margin-top: 4px; padding: 6px 10px; border-left: 2px solid rgba(255, 255, 255, 0.2); color: var(--muted); font-size: 13px; font-style: italic; quotes: "“" "”"; }
+.try-anyway { display: block; margin: 4px auto 6px; color: var(--muted); font-size: 14px; }
